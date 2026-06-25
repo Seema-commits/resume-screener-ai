@@ -13,8 +13,20 @@ flag it if you want that functionality reintroduced.
 import csv
 import io
 import json
+import re
 
 import streamlit as st
+
+
+def _slugify(name):
+    """
+    Turns a candidate name into a URL-fragment-safe id, e.g.
+    "Karthik Nair" -> "candidate-karthik-nair". Used so a link in
+    the results table can jump straight to that candidate's
+    detail expander further down the page.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return f"candidate-{slug}"
 
 
 def _html_escape(text):
@@ -71,14 +83,17 @@ def _render_table(candidates, label):
 
     for c in candidates:
 
-        name = _html_escape(c.get("candidate_name", "Unknown"))
+        raw_name = c.get("candidate_name", "Unknown")
+        name = _html_escape(raw_name)
+        anchor_id = _slugify(raw_name)
+        name_link = f'<a href="#{anchor_id}">{name}</a>'
         score = _html_escape(f"{c.get('score', 'N/A')}/100")
         recommendation = _html_escape(c.get("recommendation", ""))
         flags = _html_escape(_flag_summary(c))
 
         row_parts.append(
             "<tr>"
-            f'<td class="col-name">{name}</td>'
+            f'<td class="col-name">{name_link}</td>'
             f'<td class="col-score">{score}</td>'
             f'<td class="col-text">{recommendation}</td>'
             f'<td class="col-text">{flags}</td>'
@@ -181,7 +196,7 @@ def render_full_results(result_to_render, show_downloads=False):
     with count_col2:
         st.metric("✅ Shortlisted", len(shortlisted))
     with count_col3:
-        st.metric("❌ Rejected", len(rejected))
+        st.metric("❌ Not Shortlisted", len(rejected))
 
     # --- Downloads (only where explicitly requested) ---
 
@@ -189,10 +204,10 @@ def render_full_results(result_to_render, show_downloads=False):
 
         all_results_for_export = (
             [{"status": "Shortlisted", **c} for c in shortlisted]
-            + [{"status": "Rejected", **c} for c in rejected]
+            + [{"status": "Not Shortlisted", **c} for c in rejected]
         )
 
-        dl_col1, dl_col2 = st.columns(2)
+        dl_col1, dl_col2, _dl_spacer = st.columns([1, 1.6, 3])
 
         with dl_col1:
             st.download_button(
@@ -246,9 +261,11 @@ def render_full_results(result_to_render, show_downloads=False):
     # --- Results tables ---
 
     _render_table(shortlisted, "✅ Shortlisted")
-    _render_table(rejected, "❌ Rejected")
+    _render_table(rejected, "❌ Not Shortlisted")
 
     # --- Per-candidate detail (one expander each) ---
+
+    st.subheader("🔎 Candidate Analysis Details")
 
     all_candidates = shortlisted + rejected
 
@@ -256,6 +273,14 @@ def render_full_results(result_to_render, show_downloads=False):
 
         candidate_name = candidate.get("candidate_name", "Unknown")
         flag_count = len(candidate.get("flags", []))
+
+        # Anchor target for the clickable name link in the table
+        # above - must use the same slug logic as _render_table.
+        anchor_id = _slugify(candidate_name)
+        st.markdown(
+            f'<div id="{anchor_id}"></div>',
+            unsafe_allow_html=True
+        )
 
         expander_label = f"📄 {candidate_name} — details"
         if flag_count:

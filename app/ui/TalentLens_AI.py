@@ -40,7 +40,7 @@ from app.services.database_service import (
 # ---------------------------------------------------
 
 st.set_page_config(
-    page_title="SmartRecruit AI",
+    page_title="Smart Recruit AI",
     page_icon="🎯",
     layout="wide"
 )
@@ -97,7 +97,7 @@ orchestrator = WorkflowOrchestrator()
 # HEADER
 # ---------------------------------------------------
 
-st.title("🎯 SmartRecruit AI")
+st.title("🎯 Smart Recruit AI")
 
 
 # ---------------------------------------------------
@@ -140,7 +140,7 @@ with st.sidebar:
     top_n = st.selectbox(
         "Shortlist Count",
         [3, 5, 10, "All qualified"],
-        index=0
+        index=1  # defaults to 5
     )
 
     score_threshold = st.slider(

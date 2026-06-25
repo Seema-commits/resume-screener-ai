@@ -14,8 +14,13 @@ if "user_api_key" not in st.session_state:
 st.markdown(
     """
     By default, this app uses a pre-configured Anthropic API key.
-    , you can add your key below.
+    If you'd rather use your own key for this session, you can add
+    it below.
 
+    **Your key is never saved to a file or database.** It lives only
+    in this browser session's memory and disappears the moment you
+    close this tab or the app restarts. It is not visible to anyone
+    else using this app, including the person who built it.
     """
 )
 

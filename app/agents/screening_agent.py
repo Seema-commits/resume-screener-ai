@@ -227,12 +227,31 @@ class ScreeningAgent:
 
     def classify_candidates(self, candidates, top_n, score_threshold_100):
 
+        def _criterion_score(candidate, criterion_name):
+            for crit in candidate.criteria:
+                if crit.criterion == criterion_name:
+                    return crit.score
+            return 0
+
+        def _sort_key(candidate):
+            # Primary: overall score. Tie-breakers (deterministic,
+            # not arbitrary list order): higher Skills sub-score
+            # wins, then higher Experience sub-score, then name
+            # alphabetically as a final, fully deterministic
+            # fallback so ranking never depends on input order.
+            return (
+                -candidate.score,
+                -_criterion_score(candidate, "Skills"),
+                -_criterion_score(candidate, "Experience"),
+                candidate.candidate_name
+            )
+
         qualified = [
             c for c in candidates
             if c.score >= score_threshold_100
         ]
 
-        qualified.sort(key=lambda c: c.score, reverse=True)
+        qualified.sort(key=_sort_key)
 
         if top_n == "All qualified":
             shortlisted = qualified
@@ -243,14 +262,14 @@ class ScreeningAgent:
             c.candidate_name for c in shortlisted
         }
 
-        rejected = [
+        not_shortlisted = [
             c for c in candidates
             if c.candidate_name not in shortlisted_names
         ]
 
-        rejected.sort(key=lambda c: c.score, reverse=True)
+        not_shortlisted.sort(key=_sort_key)
 
-        return shortlisted, rejected
+        return shortlisted, not_shortlisted
 
     # -----------------------------------------------
     # MAIN ENTRY POINT
