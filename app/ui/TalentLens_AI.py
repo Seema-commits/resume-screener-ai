@@ -1,3 +1,18 @@
+import sys
+import os
+
+# Make sure the project root (the folder containing "app/") is on
+# sys.path, regardless of how this script gets launched. Locally,
+# "python -m streamlit run ..." happens to add the current folder
+# automatically, which is why this works without it on your own
+# machine - but Streamlit Cloud launches scripts differently and
+# never adds it, so "from app.X import Y" fails there without
+# this explicit fix.
+sys.path.insert(
+    0,
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+)
+
 import streamlit as st
 import uuid
 
