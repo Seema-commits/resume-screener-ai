@@ -1,0 +1,9 @@
+streamlit
+anthropic
+python-dotenv
+requests
+PyPDF2
+python-docx
+pydantic
+sqlalchemy
+psycopg2-binary

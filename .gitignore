@@ -1,0 +1,53 @@
+# Secrets - never commit these
+.env
+.env.*
+*.key
+key
+key2
+
+# Streamlit secrets (if you ever create this locally)
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# Local logs (not needed in the repo)
+logs/
+
+# Editor/OS junk
+.DS_Store
+.vscode/
+
+# Virtual environments
+venv/
+env/
+.venv/# Secrets - never commit these
+.env
+.env.*
+*.key
+key
+key2
+
+# Streamlit secrets (if you ever create this locally)
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# Local logs (not needed in the repo)
+logs/
+
+# Editor/OS junk
+.DS_Store
+.vscode/
+
+# Virtual environments
+venv/
+env/
+.venv/

@@ -1,0 +1,353 @@
+"""
+Shared rendering for resume-screening results - used by both the
+main screening page and the Dashboard page, so they always show
+the identical table/breakdown format instead of two copies of the
+same logic drifting apart over time.
+
+Note: approve/reject UI was intentionally dropped from this shared
+renderer during this refactor (it had been hidden behind a feature
+flag for a while and wasn't part of the graded assignment scope) -
+flag it if you want that functionality reintroduced.
+"""
+
+import csv
+import io
+import json
+
+import streamlit as st
+
+
+def _html_escape(text):
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _flag_summary(candidate, max_shown=2):
+    """
+    Compact, visible flag summary for the table - full detail
+    (severity, evidence) lives in the per-candidate expander.
+    """
+    flags = candidate.get("flags", [])
+
+    if not flags:
+        return "None"
+
+    labels = [
+        f.get("description") or f.get("flag_type", "flag")
+        for f in flags
+    ]
+
+    shown = "; ".join(f"⚠ {label}" for label in labels[:max_shown])
+
+    remaining = len(labels) - max_shown
+
+    if remaining > 0:
+        shown += f" (+{remaining} more)"
+
+    return shown
+
+
+def _render_table(candidates, label):
+    """
+    Custom HTML table instead of st.dataframe - wraps long
+    Recommendation/Flags text instead of truncating/scrolling.
+
+    IMPORTANT: built as a single line with no leading whitespace
+    before being passed to st.markdown - Markdown treats 4+
+    leading spaces as a code block, which previously caused the
+    raw tags to render as literal text instead of an actual table.
+    """
+
+    if not candidates:
+        return
+
+    st.write(f"**{label}**")
+
+    row_parts = []
+
+    for c in candidates:
+
+        name = _html_escape(c.get("candidate_name", "Unknown"))
+        score = _html_escape(f"{c.get('score', 'N/A')}/100")
+        recommendation = _html_escape(c.get("recommendation", ""))
+        flags = _html_escape(_flag_summary(c))
+
+        row_parts.append(
+            "<tr>"
+            f'<td class="col-name">{name}</td>'
+            f'<td class="col-score">{score}</td>'
+            f'<td class="col-text">{recommendation}</td>'
+            f'<td class="col-text">{flags}</td>'
+            "</tr>"
+        )
+
+    rows_html = "".join(row_parts)
+
+    style = (
+        "<style>"
+        ".screening-table{width:100%;"
+        "border-collapse:collapse;table-layout:fixed;"
+        "font-size:0.9rem;}"
+        ".screening-table th{text-align:left;padding:8px;"
+        "border-bottom:2px solid #444;}"
+        ".screening-table td{padding:10px 8px;"
+        "border-bottom:1px solid #444;vertical-align:top;"
+        "white-space:normal;word-wrap:break-word;"
+        "overflow-wrap:break-word;line-height:1.4;}"
+        ".screening-table .col-name{width:16%;}"
+        ".screening-table .col-score{width:10%;}"
+        ".screening-table .col-text{width:37%;}"
+        "</style>"
+    )
+
+    table_html = (
+        style
+        + '<table class="screening-table"><thead><tr>'
+        + '<th class="col-name">Candidate</th>'
+        + '<th class="col-score">Score</th>'
+        + '<th class="col-text">Recommendation</th>'
+        + '<th class="col-text">Flags</th>'
+        + "</tr></thead><tbody>"
+        + rows_html
+        + "</tbody></table>"
+    )
+
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
+def build_csv(all_results):
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow([
+        "Candidate", "Status", "Score", "Recommendation",
+        "Flags", "Matched Skills", "Missing Skills"
+    ])
+
+    for c in all_results:
+
+        writer.writerow([
+            c.get("candidate_name", ""),
+            c.get("status", ""),
+            c.get("score", ""),
+            c.get("recommendation", ""),
+            "; ".join(
+                f.get("description", "") for f in c.get("flags", [])
+            ),
+            ", ".join(c.get("matched_skills", [])),
+            ", ".join(c.get("missing_skills", [])),
+        ])
+
+    return output.getvalue()
+
+
+def render_full_results(result_to_render, show_downloads=False):
+    """
+    Renders the complete screening-results view: counts,
+    (optionally) download buttons, the scoring-weights box, the
+    Shortlisted/Rejected tables, and per-candidate detail
+    expanders. Used identically by the main page and Dashboard.
+    """
+
+    if not result_to_render or "shortlisted_candidates" not in result_to_render:
+        st.info("No screening results yet - run a screening first.")
+        return
+
+    shortlisted = result_to_render.get("shortlisted_candidates", [])
+    rejected = result_to_render.get("rejected_candidates", [])
+    parsed_profiles = result_to_render.get("parsed_profiles", [])
+
+    parsed_profile_lookup = {
+        p.get("candidate_name", ""): p for p in parsed_profiles
+    }
+
+    if not (shortlisted or rejected):
+        st.info("No screening results yet - run a screening first.")
+        return
+
+    st.subheader("📊 Screening Results")
+
+    # --- Counts ---
+
+    count_col1, count_col2, count_col3 = st.columns(3)
+
+    with count_col1:
+        st.metric("Total Screened", len(shortlisted) + len(rejected))
+    with count_col2:
+        st.metric("✅ Shortlisted", len(shortlisted))
+    with count_col3:
+        st.metric("❌ Rejected", len(rejected))
+
+    # --- Downloads (only where explicitly requested) ---
+
+    if show_downloads:
+
+        all_results_for_export = (
+            [{"status": "Shortlisted", **c} for c in shortlisted]
+            + [{"status": "Rejected", **c} for c in rejected]
+        )
+
+        dl_col1, dl_col2 = st.columns(2)
+
+        with dl_col1:
+            st.download_button(
+                "⬇️ Download CSV",
+                data=build_csv(all_results_for_export),
+                file_name="screening_results.csv",
+                mime="text/csv"
+            )
+
+        with dl_col2:
+            st.download_button(
+                "⬇️ Download Full JSON (incl. parsed profiles)",
+                data=json.dumps(result_to_render, indent=2),
+                file_name="screening_results_full.json",
+                mime="application/json"
+            )
+
+    # --- Scoring weights box ---
+
+    criteria_weights = result_to_render.get("criteria_weights")
+    matched_signals = result_to_render.get("matched_weight_signals", [])
+
+    if criteria_weights:
+
+        weight_line = " · ".join(
+            f"{cat} {pts}" for cat, pts in criteria_weights.items()
+        )
+
+        with st.expander(f"⚖️ Scoring weights for this JD: {weight_line}"):
+
+            if matched_signals:
+
+                st.caption(
+                    "Detected in the job description (deterministic "
+                    "keyword rules, computed once and applied "
+                    "identically to every candidate below):"
+                )
+
+                for sig in matched_signals:
+                    st.write(
+                        f"- **{sig['category']}** → {sig['target']} pts "
+                        f"(matched: \"{sig['phrase']}\" — {sig['reason']})"
+                    )
+
+            else:
+                st.write(
+                    "No specific education/experience/domain signals "
+                    "detected in the JD - using base weights."
+                )
+
+    # --- Results tables ---
+
+    _render_table(shortlisted, "✅ Shortlisted")
+    _render_table(rejected, "❌ Rejected")
+
+    # --- Per-candidate detail (one expander each) ---
+
+    all_candidates = shortlisted + rejected
+
+    for candidate in all_candidates:
+
+        candidate_name = candidate.get("candidate_name", "Unknown")
+        flag_count = len(candidate.get("flags", []))
+
+        expander_label = f"📄 {candidate_name} — details"
+        if flag_count:
+            expander_label += f" ({flag_count} flag(s) ⚠️)"
+
+        with st.expander(expander_label):
+
+            st.metric("Overall Score", f"{candidate.get('score', 'N/A')}/100")
+
+            criteria = candidate.get("criteria", [])
+
+            if criteria:
+                st.write("**Score breakdown:**")
+                for crit in criteria:
+                    st.write(
+                        f"- **{crit.get('criterion', '')}**: "
+                        f"{crit.get('score', 'N/A')}/"
+                        f"{crit.get('max_score', 'N/A')} — "
+                        f"{crit.get('reason', '')}"
+                    )
+
+            st.write("**Strengths:**")
+            for s in candidate.get("strengths", []):
+                st.write(f"• {s}")
+            if not candidate.get("strengths"):
+                st.write("• None listed")
+
+            st.write("**Gaps:**")
+            gap_items = (
+                list(candidate.get("missing_skills", []))
+                + list(candidate.get("weaknesses", []))
+            )
+            if gap_items:
+                for g in gap_items:
+                    st.write(f"• {g}")
+            else:
+                st.write("• None")
+
+            flags = candidate.get("flags", [])
+            st.write("**Flags:**")
+            if flags:
+                for f in flags:
+                    severity = f.get("severity", "medium")
+                    st.write(
+                        f"- ⚠️ **[{severity.upper()}]** "
+                        f"{f.get('description', '')}"
+                        + (
+                            f" _(evidence: {f.get('evidence')})_"
+                            if f.get("evidence") else ""
+                        )
+                    )
+            else:
+                st.write("- None")
+
+            profile = parsed_profile_lookup.get(candidate_name)
+            st.write("**Parsed profile:**")
+
+            if profile:
+
+                location = profile.get("location")
+                education = profile.get("education", [])
+                roles = profile.get("roles", [])
+                skills = profile.get("skills", [])
+
+                st.caption("Location")
+                st.write(f"• {location or 'Not stated'}")
+
+                st.caption("Education")
+                if education:
+                    for edu in education:
+                        st.write(
+                            f"• {edu.get('degree', '')} — "
+                            f"{edu.get('institution', '')} "
+                            f"({edu.get('end_year', 'N/A')})"
+                        )
+                else:
+                    st.write("• None found")
+
+                st.caption("Roles")
+                if roles:
+                    for role in roles:
+                        st.write(
+                            f"• {role.get('title', '')} at "
+                            f"{role.get('company', '')} "
+                            f"({role.get('start_date', '?')} → "
+                            f"{role.get('end_date', '?')})"
+                        )
+                else:
+                    st.write("• None found")
+
+                st.caption("Skills")
+                st.write(", ".join(skills) if skills else "None found")
+
+            else:
+                st.write("• Not available")
