@@ -54,6 +54,35 @@ FLAGGING RULE:
 - If a candidate has no flags at all, return an empty flags list -
   do not invent flags to fill the field.
 
+SKILL MATCHING RULE - this is a frequent error to avoid:
+
+Before listing anything in "missing_skills", you MUST check it against
+the candidate's own "skills" array in their structured profile above.
+- If a skill (or a clear synonym/equivalent of it) already appears in
+  the candidate's skills array, it belongs in "matched_skills" -
+  NEVER in "missing_skills", even if you're not confident it was used
+  extensively. Listing a skill as missing when it's literally present
+  in their skills array is a contradiction and not acceptable.
+- Only list something in "missing_skills" if it does NOT appear
+  anywhere in the candidate's skills array at all.
+- "matched_skills" should include every JD-relevant skill that does
+  appear in the candidate's skills array - be thorough, not sparse.
+- This same rule applies to "weaknesses" text: never write a
+  weakness like "lacks X" or "no X experience" if X is literally
+  present in the candidate's skills array. Double-check every
+  weakness bullet against the skills array before including it.
+
+LOCATION RULE - consistency with deterministic flags:
+
+A candidate based in a different city but the SAME country as the
+JD's location (e.g. Abu Dhabi vs Dubai - both UAE) is NOT a gap or
+weakness worth mentioning - do not write "located in X, not Y" or
+similar commentary for same-country differences in "gaps",
+"weaknesses", or "strengths". Only raise location as a concern in
+your own commentary if the candidate is in a genuinely different
+country than the JD requires, matching the same policy the
+deterministic location flag already uses.
+
 Required JSON format (criterion names/max_scores below are
 illustrative - use the ACTUAL ones given to you in the user
 message):
