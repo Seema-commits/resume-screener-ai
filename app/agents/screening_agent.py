@@ -1,486 +1,137 @@
-import json
-import re
+SCREENING_PROMPT = """
+You are a JSON-only HR screening API.
 
-from app.services.ai_service import call_ai
-from app.prompts.screening_prompts import SCREENING_PROMPT
-from app.prompts.parsing_prompts import PARSE_PROMPT
-from app.utils.json_parser import extract_json
-from app.utils.date_utils import run_integrity_checks
-from app.utils.weight_rules import derive_criteria_weights
-from app.utils.location_rules import (
-    parse_jd_location,
-    check_location_mismatch
-)
-from app.models.screening_models import (
-    CandidateScoringResponse,
-    ParsedProfilesResponse
-)
-from app.services.logging_service import log_event
+You will be given:
+- A job description
+- The 4 scoring criteria for THIS job, with point caps that were
+  derived deterministically from the job description (NOT decided
+  by you - use them exactly as given)
+- A BATCH of structured candidate profiles (already parsed: roles
+  with dates, education, skills - these are FACTS, already
+  extracted, trust them)
+- A list of integrity flags ALREADY DETECTED by deterministic code
+  (date overlaps, contradictory dates, senior-title/little-experience
+  mismatches, skills with no work history, location mismatches)
 
+Score ONLY the candidates given in this batch. Do NOT decide who is
+shortlisted or rejected - that decision is made separately, by code,
+after all batches are scored. Your only job is to produce a fair,
+well-reasoned score for each candidate in this batch.
 
-# Candidates per batch, for BOTH parsing and scoring calls. Kept
-# small so a batch's JSON response never gets close to the model's
-# max_tokens limit, regardless of how many resumes are uploaded in
-# total (this is what fixes the truncation/JSON-decode-error issue
-# at scale).
-BATCH_SIZE = 4
+STRICT RULES:
 
-PARSE_MAX_TOKENS_PER_BATCH = 6000
-SCORING_MAX_TOKENS_PER_BATCH = 4000
+1. Return ONLY valid JSON
+2. No markdown
+3. No explanations
+4. No intro text
+5. Response MUST start with {
+6. Response MUST end with }
+7. Keep every "reason" string SHORT - one sentence, ideally under
+   20 words. Keep "strengths" and "weaknesses" to at most 3 bullet
+   points each. This keeps responses compact so nothing gets cut off.
 
+SCORING RULE - NEVER return a single opaque score:
 
-def _split_into_candidate_chunks(candidate_text):
-    """
-    parser_service.py formats combined_text with
-    "--- Candidate N: name ---" markers before each resume's text.
-    Split back into one chunk per candidate so parsing can be
-    batched instead of sent as one giant request.
-    """
+Use EXACTLY the 4 criteria names and max_score point caps given to
+you in the user message (they sum to 100 - do not change them, do
+not invent different criteria). Every criterion MUST include a
+"score" (points earned, 0 to its given max_score) and a short
+"reason" - never leave a score unexplained. The overall "score"
+field MUST equal the sum of the 4 criteria scores, so it is always
+fully traceable, never invented separately.
 
-    parts = re.split(r"(?=--- Candidate \d+:)", candidate_text)
-    return [p.strip() for p in parts if p.strip()]
+FLAGGING RULE:
 
+- For each candidate, copy over any integrity flags they were given
+  EXACTLY as provided (same flag_type, severity, description,
+  evidence), then add your own flags ONLY if you find something the
+  deterministic checks missed, using ONLY these additional
+  flag_type values:
+  - "contradictory_claim" (a skill or claim that contradicts the
+    candidate's own timeline or other stated facts)
+  - "unverifiable_skill" (a skill listed but never evidenced by
+    any role or project)
+- If a candidate has no flags at all, return an empty flags list -
+  do not invent flags to fill the field.
 
-class ScreeningAgent:
+SKILL MATCHING RULE - this is a frequent error to avoid:
 
-    # -----------------------------------------------
-    # STAGE 1: parse raw resume text into structured
-    # entities (roles with dates, education, skills).
-    # Facts only - no scoring/judgment happens here.
-    # Done in batches so large resume counts can't
-    # truncate the response.
-    # -----------------------------------------------
+Before listing anything in "missing_skills", you MUST check it against
+the candidate's own "skills" array in their structured profile above.
+- If a skill (or a clear synonym/equivalent of it) already appears in
+  the candidate's skills array, it belongs in "matched_skills" -
+  NEVER in "missing_skills", even if you're not confident it was used
+  extensively. Listing a skill as missing when it's literally present
+  in their skills array is a contradiction and not acceptable.
+- Only list something in "missing_skills" if it does NOT appear
+  anywhere in the candidate's skills array at all.
+- "matched_skills" should include every JD-relevant skill that does
+  appear in the candidate's skills array - be thorough, not sparse.
+- This same rule applies to "weaknesses" text: never write a
+  weakness like "lacks X" or "no X experience" if X is literally
+  present in the candidate's skills array. Double-check every
+  weakness bullet against the skills array before including it.
 
-    def parse_resumes(self, session_id, candidate_text, api_key=None):
+LOCATION RULE - consistency with deterministic flags:
 
-        chunks = _split_into_candidate_chunks(candidate_text)
+A candidate based in a different city but the SAME country as the
+JD's location (e.g. Abu Dhabi vs Dubai - both UAE) is NOT a gap or
+weakness worth mentioning - do not write "located in X, not Y" or
+similar commentary for same-country differences in "gaps",
+"weaknesses", or "strengths". Only raise location as a concern in
+your own commentary if the candidate is in a genuinely different
+country than the JD requires, matching the same policy the
+deterministic location flag already uses.
 
-        if not chunks:
-            return []
+Required JSON format (criterion names/max_scores below are
+illustrative - use the ACTUAL ones given to you in the user
+message):
 
-        all_profiles = []
-
-        for i in range(0, len(chunks), BATCH_SIZE):
-
-            batch_chunks = chunks[i:i + BATCH_SIZE]
-            batch_text = "\n\n".join(batch_chunks)
-
-            # Retry up to 3 total attempts - a malformed/truncated
-            # JSON response from the model is often a one-off
-            # glitch, not tied to specific resume content (we've
-            # seen the same candidate succeed alone but fail when
-            # batched, and vice versa) - retrying immediately
-            # usually resolves it without losing the whole batch.
-            max_attempts = 3
-            last_exception = None
-            last_response = None
-
-            for attempt in range(1, max_attempts + 1):
-
-                response = call_ai(
-                    batch_text,
-                    system_prompt=PARSE_PROMPT,
-                    max_tokens=PARSE_MAX_TOKENS_PER_BATCH,
-                    api_key=api_key
-                )
-
-                last_response = response
-
-                try:
-
-                    parsed = extract_json(response)
-                    validated = ParsedProfilesResponse(**parsed)
-                    all_profiles.extend(validated.profiles)
-                    last_exception = None
-                    break  # success - no need to retry
-
-                except Exception as e:
-
-                    last_exception = e
-
-                    print(
-                        f"\n===== PARSE BATCH ATTEMPT "
-                        f"{attempt}/{max_attempts} FAILED =====\n"
-                    )
-                    print(
-                        f"Batch {i // BATCH_SIZE + 1}: {str(e)}"
-                    )
-                    print("\n==============================\n")
-
-            if last_exception is not None:
-
-                log_event(
-                    session_id=session_id,
-                    agent_name="ScreeningAgent",
-                    event_type="parse_batch_error",
-                    data={
-                        "batch_index": i // BATCH_SIZE,
-                        "attempts_made": max_attempts,
-                        "error": str(last_exception),
-                        "raw_response": last_response
-                    }
-                )
-
-                # all retries exhausted - one failed parse batch
-                # shouldn't sink the whole run - those candidates
-                # just won't get flags/scored against structured
-                # facts, skip and continue
-                continue
-
-        log_event(
-            session_id=session_id,
-            agent_name="ScreeningAgent",
-            event_type="parsed_profiles",
-            data={
-                "profile_count": len(all_profiles),
-                # Full roles/dates per candidate - this is what
-                # lets you compare what Stage 1 actually extracted
-                # between two runs if a flag (e.g. date overlap)
-                # unexpectedly appears or disappears.
-                "profiles": [p.model_dump() for p in all_profiles]
-            }
-        )
-
-        return all_profiles
-
-    # -----------------------------------------------
-    # STAGE 2: deterministic integrity checks. Pure
-    # Python, NO LLM call - this is what makes these
-    # flags defensible/explainable in the demo.
-    # -----------------------------------------------
-
-    def detect_flags(self, profiles, job_description):
-
-        jd_location_info = parse_jd_location(job_description)
-
-        flags_by_candidate = {}
-
-        for profile in profiles:
-
-            flags = run_integrity_checks(profile)
-
-            flags += check_location_mismatch(
-                profile.location,
-                jd_location_info
-            )
-
-            if flags:
-                flags_by_candidate[profile.candidate_name] = flags
-
-        return flags_by_candidate
-
-    # -----------------------------------------------
-    # STAGE 3: score against the JD using the
-    # structured profiles + deterministic flags as
-    # input. Per-criterion breakdown, never a single
-    # opaque number. Done in small BATCHES so the
-    # response never gets large enough to be truncated,
-    # no matter how many resumes are uploaded.
-    # -----------------------------------------------
-
-    def score_batch(
-        self,
-        session_id,
-        job_description,
-        profiles_batch,
-        deterministic_flags,
-        criteria_weights,
-        api_key=None
-    ):
-
-        profiles_json = json.dumps(
-            [p.model_dump() for p in profiles_batch],
-            indent=2
-        )
-
-        batch_flags = {
-            p.candidate_name: deterministic_flags[p.candidate_name]
-            for p in profiles_batch
-            if p.candidate_name in deterministic_flags
+{
+  "candidates": [
+    {
+      "candidate_name": "string",
+      "score": 0,
+      "criteria": [
+        {
+          "criterion": "Skills",
+          "max_score": 40,
+          "score": 0,
+          "reason": "string"
+        },
+        {
+          "criterion": "Experience",
+          "max_score": 30,
+          "score": 0,
+          "reason": "string"
+        },
+        {
+          "criterion": "Education",
+          "max_score": 10,
+          "score": 0,
+          "reason": "string"
+        },
+        {
+          "criterion": "Domain",
+          "max_score": 20,
+          "score": 0,
+          "reason": "string"
         }
-
-        flags_json = json.dumps(batch_flags, indent=2)
-
-        criteria_json = json.dumps(criteria_weights, indent=2)
-
-        prompt = f"""
-        Job Description:
-        {job_description}
-
-        Use EXACTLY these 4 criteria and point caps for every
-        candidate in this batch (derived deterministically from
-        the job description above - do not change them):
-        {criteria_json}
-
-        Structured Candidate Profiles in this batch (already
-        parsed - facts, trust these, do not re-parse from scratch):
-        {profiles_json}
-
-        Integrity flags already detected by deterministic code for
-        these candidates, keyed by candidate_name (copy these into
-        each candidate's flags list exactly as given, then add your
-        own if you find contradictions or unverifiable skills):
-        {flags_json}
-        """
-
-        max_attempts = 3
-        last_exception = None
-        last_response = None
-
-        for attempt in range(1, max_attempts + 1):
-
-            response = call_ai(
-                prompt,
-                system_prompt=SCREENING_PROMPT,
-                max_tokens=SCORING_MAX_TOKENS_PER_BATCH,
-                api_key=api_key
-            )
-
-            last_response = response
-
-            try:
-
-                parsed_response = extract_json(response)
-
-                validated_response = CandidateScoringResponse(
-                    **parsed_response
-                )
-
-                return validated_response.candidates
-
-            except Exception as e:
-
-                last_exception = e
-
-                print(
-                    f"\n===== SCORE BATCH ATTEMPT "
-                    f"{attempt}/{max_attempts} FAILED =====\n"
-                )
-                print(str(e))
-                print("\n==================================\n")
-
-        raise RuntimeError(
-            f"{str(last_exception)} | "
-            f"RAW RESPONSE: {last_response[:500]}"
-        )
-
-    # -----------------------------------------------
-    # Deterministic classification: shortlist/reject
-    # is decided here, in code, not by the LLM. This
-    # also scales correctly to any number of resumes.
-    # -----------------------------------------------
-
-    def classify_candidates(self, candidates, top_n, score_threshold_100):
-
-        def _criterion_score(candidate, criterion_name):
-            for crit in candidate.criteria:
-                if crit.criterion == criterion_name:
-                    return crit.score
-            return 0
-
-        def _sort_key(candidate):
-            # Primary: overall score. Tie-breakers (deterministic,
-            # not arbitrary list order): higher Skills sub-score
-            # wins, then higher Experience sub-score, then name
-            # alphabetically as a final, fully deterministic
-            # fallback so ranking never depends on input order.
-            return (
-                -candidate.score,
-                -_criterion_score(candidate, "Skills"),
-                -_criterion_score(candidate, "Experience"),
-                candidate.candidate_name
-            )
-
-        qualified = [
-            c for c in candidates
-            if c.score >= score_threshold_100
-        ]
-
-        qualified.sort(key=_sort_key)
-
-        if top_n == "All qualified":
-            shortlisted = qualified
-        else:
-            shortlisted = qualified[:int(top_n)]
-
-        shortlisted_names = {
-            c.candidate_name for c in shortlisted
+      ],
+      "matched_skills": [],
+      "missing_skills": [],
+      "strengths": [],
+      "weaknesses": [],
+      "flags": [
+        {
+          "flag_type": "date_overlap",
+          "severity": "medium",
+          "description": "string",
+          "evidence": "string"
         }
-
-        not_shortlisted = [
-            c for c in candidates
-            if c.candidate_name not in shortlisted_names
-        ]
-
-        not_shortlisted.sort(key=_sort_key)
-
-        return shortlisted, not_shortlisted
-
-    # -----------------------------------------------
-    # MAIN ENTRY POINT
-    # -----------------------------------------------
-
-    def screen_candidates(
-        self,
-        session_id,
-        job_description,
-        candidate_text,
-        top_n,
-        score_threshold,
-        api_key=None
-    ):
-
-        # ---------------------------------------
-        # Stage 1
-        # ---------------------------------------
-
-        try:
-
-            profiles = self.parse_resumes(
-                session_id,
-                candidate_text,
-                api_key=api_key
-            )
-
-        except Exception as e:
-
-            log_event(
-                session_id=session_id,
-                agent_name="ScreeningAgent",
-                event_type="parse_error",
-                data={"error": str(e)}
-            )
-
-            return {
-                "error": "Resume parsing failed",
-                "details": str(e)
-            }
-
-        # ---------------------------------------
-        # Stage 2
-        # ---------------------------------------
-
-        deterministic_flags = self.detect_flags(
-            profiles,
-            job_description
-        )
-
-        # Derived ONCE per run (per job description), reused
-        # identically across every candidate/batch - this is what
-        # keeps the ranking apples-to-apples within a single run,
-        # even though different JDs can produce different weights.
-        weight_result = derive_criteria_weights(job_description)
-        criteria_weights = weight_result["weights"]
-
-        log_event(
-            session_id=session_id,
-            agent_name="ScreeningAgent",
-            event_type="request",
-            data={
-                "job_description": job_description,
-                "top_n": top_n,
-                "score_threshold": score_threshold,
-                "deterministic_flags": deterministic_flags,
-                "candidate_count": len(profiles),
-                "criteria_weights": criteria_weights,
-                "matched_weight_signals": weight_result[
-                    "matched_signals"
-                ]
-            }
-        )
-
-        # ---------------------------------------
-        # Stage 3 - score in batches
-        # ---------------------------------------
-
-        all_candidates = []
-        last_error = None
-
-        for i in range(0, len(profiles), BATCH_SIZE):
-
-            batch = profiles[i:i + BATCH_SIZE]
-
-            try:
-
-                batch_candidates = self.score_batch(
-                    session_id,
-                    job_description,
-                    batch,
-                    deterministic_flags,
-                    criteria_weights,
-                    api_key=api_key
-                )
-
-                all_candidates.extend(batch_candidates)
-
-            except Exception as e:
-
-                last_error = str(e)
-
-                print("\n===== BATCH SCORING ERROR =====\n")
-                print(f"Batch {i // BATCH_SIZE + 1}: {last_error}")
-                print("\n================================\n")
-
-                log_event(
-                    session_id=session_id,
-                    agent_name="ScreeningAgent",
-                    event_type="batch_error",
-                    data={
-                        "batch_index": i // BATCH_SIZE,
-                        "error": last_error
-                    }
-                )
-
-                # one failed batch shouldn't sink the whole run -
-                # skip it and keep going with the rest
-                continue
-
-        if not all_candidates:
-
-            return {
-                "error": "Validation failed",
-                "details": (
-                    "No candidates could be scored - "
-                    "all batches failed"
-                ),
-                "raw_response": (
-                    last_error or "No error details captured"
-                )
-            }
-
-        # ---------------------------------------
-        # Classify (deterministic, in code)
-        # ---------------------------------------
-
-        score_threshold_100 = score_threshold * 10
-
-        shortlisted, rejected = self.classify_candidates(
-            all_candidates,
-            top_n,
-            score_threshold_100
-        )
-
-        output = {
-            "shortlisted_candidates": [
-                c.model_dump() for c in shortlisted
-            ],
-            "rejected_candidates": [
-                c.model_dump() for c in rejected
-            ],
-            "parsed_profiles": [
-                p.model_dump() for p in profiles
-            ],
-            "criteria_weights": criteria_weights,
-            "matched_weight_signals": weight_result[
-                "matched_signals"
-            ]
-        }
-
-        log_event(
-            session_id=session_id,
-            agent_name="ScreeningAgent",
-            event_type="response",
-            data=output
-        )
-
-        return output
+      ],
+      "recommendation": "string"
+    }
+  ]
+}
+"""
