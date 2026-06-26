@@ -8,16 +8,16 @@ from typing import List, Optional
 
 class RoleEntry(BaseModel):
 
-    title: str = ""
-    company: str = ""
+    title: Optional[str] = None
+    company: Optional[str] = None
     start_date: Optional[str] = None  # normalized "YYYY-MM"
     end_date: Optional[str] = None    # "YYYY-MM" or "present"
 
 
 class EducationEntry(BaseModel):
 
-    degree: str = ""
-    institution: str = ""
+    degree: Optional[str] = None
+    institution: Optional[str] = None
     end_year: Optional[str] = None
 
 

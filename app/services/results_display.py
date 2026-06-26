@@ -352,9 +352,9 @@ def render_full_results(result_to_render, show_downloads=False):
                 if education:
                     for edu in education:
                         st.write(
-                            f"• {edu.get('degree', '')} — "
-                            f"{edu.get('institution', '')} "
-                            f"({edu.get('end_year', 'N/A')})"
+                            f"• {edu.get('degree') or 'Unspecified degree'} — "
+                            f"{edu.get('institution') or 'Unspecified institution'} "
+                            f"({edu.get('end_year') or 'N/A'})"
                         )
                 else:
                     st.write("• None found")
@@ -363,10 +363,10 @@ def render_full_results(result_to_render, show_downloads=False):
                 if roles:
                     for role in roles:
                         st.write(
-                            f"• {role.get('title', '')} at "
-                            f"{role.get('company', '')} "
-                            f"({role.get('start_date', '?')} → "
-                            f"{role.get('end_date', '?')})"
+                            f"• {role.get('title') or 'Unspecified role'} at "
+                            f"{role.get('company') or 'Unspecified company'} "
+                            f"({role.get('start_date') or '?'} → "
+                            f"{role.get('end_date') or '?'})"
                         )
                 else:
                     st.write("• None found")

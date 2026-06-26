@@ -23,9 +23,9 @@ from app.services.logging_service import log_event
 # max_tokens limit, regardless of how many resumes are uploaded in
 # total (this is what fixes the truncation/JSON-decode-error issue
 # at scale).
-BATCH_SIZE = 5
+BATCH_SIZE = 4
 
-PARSE_MAX_TOKENS_PER_BATCH = 3000
+PARSE_MAX_TOKENS_PER_BATCH = 6000
 SCORING_MAX_TOKENS_PER_BATCH = 4000
 
 
@@ -65,24 +65,49 @@ class ScreeningAgent:
             batch_chunks = chunks[i:i + BATCH_SIZE]
             batch_text = "\n\n".join(batch_chunks)
 
-            response = call_ai(
-                batch_text,
-                system_prompt=PARSE_PROMPT,
-                max_tokens=PARSE_MAX_TOKENS_PER_BATCH,
-                api_key=api_key
-            )
+            # Retry up to 3 total attempts - a malformed/truncated
+            # JSON response from the model is often a one-off
+            # glitch, not tied to specific resume content (we've
+            # seen the same candidate succeed alone but fail when
+            # batched, and vice versa) - retrying immediately
+            # usually resolves it without losing the whole batch.
+            max_attempts = 3
+            last_exception = None
+            last_response = None
 
-            try:
+            for attempt in range(1, max_attempts + 1):
 
-                parsed = extract_json(response)
-                validated = ParsedProfilesResponse(**parsed)
-                all_profiles.extend(validated.profiles)
+                response = call_ai(
+                    batch_text,
+                    system_prompt=PARSE_PROMPT,
+                    max_tokens=PARSE_MAX_TOKENS_PER_BATCH,
+                    api_key=api_key
+                )
 
-            except Exception as e:
+                last_response = response
 
-                print("\n===== PARSE BATCH ERROR =====\n")
-                print(f"Batch {i // BATCH_SIZE + 1}: {str(e)}")
-                print("\n==============================\n")
+                try:
+
+                    parsed = extract_json(response)
+                    validated = ParsedProfilesResponse(**parsed)
+                    all_profiles.extend(validated.profiles)
+                    last_exception = None
+                    break  # success - no need to retry
+
+                except Exception as e:
+
+                    last_exception = e
+
+                    print(
+                        f"\n===== PARSE BATCH ATTEMPT "
+                        f"{attempt}/{max_attempts} FAILED =====\n"
+                    )
+                    print(
+                        f"Batch {i // BATCH_SIZE + 1}: {str(e)}"
+                    )
+                    print("\n==============================\n")
+
+            if last_exception is not None:
 
                 log_event(
                     session_id=session_id,
@@ -90,14 +115,16 @@ class ScreeningAgent:
                     event_type="parse_batch_error",
                     data={
                         "batch_index": i // BATCH_SIZE,
-                        "error": str(e),
-                        "raw_response": response
+                        "attempts_made": max_attempts,
+                        "error": str(last_exception),
+                        "raw_response": last_response
                     }
                 )
 
-                # one failed parse batch shouldn't sink the whole
-                # run - those candidates just won't get flags/
-                # scored against structured facts, skip and continue
+                # all retries exhausted - one failed parse batch
+                # shouldn't sink the whole run - those candidates
+                # just won't get flags/scored against structured
+                # facts, skip and continue
                 continue
 
         log_event(
@@ -196,28 +223,46 @@ class ScreeningAgent:
         {flags_json}
         """
 
-        response = call_ai(
-            prompt,
-            system_prompt=SCREENING_PROMPT,
-            max_tokens=SCORING_MAX_TOKENS_PER_BATCH,
-            api_key=api_key
+        max_attempts = 3
+        last_exception = None
+        last_response = None
+
+        for attempt in range(1, max_attempts + 1):
+
+            response = call_ai(
+                prompt,
+                system_prompt=SCREENING_PROMPT,
+                max_tokens=SCORING_MAX_TOKENS_PER_BATCH,
+                api_key=api_key
+            )
+
+            last_response = response
+
+            try:
+
+                parsed_response = extract_json(response)
+
+                validated_response = CandidateScoringResponse(
+                    **parsed_response
+                )
+
+                return validated_response.candidates
+
+            except Exception as e:
+
+                last_exception = e
+
+                print(
+                    f"\n===== SCORE BATCH ATTEMPT "
+                    f"{attempt}/{max_attempts} FAILED =====\n"
+                )
+                print(str(e))
+                print("\n==================================\n")
+
+        raise RuntimeError(
+            f"{str(last_exception)} | "
+            f"RAW RESPONSE: {last_response[:500]}"
         )
-
-        try:
-
-            parsed_response = extract_json(response)
-
-            validated_response = CandidateScoringResponse(
-                **parsed_response
-            )
-
-            return validated_response.candidates
-
-        except Exception as e:
-
-            raise RuntimeError(
-                f"{str(e)} | RAW RESPONSE: {response[:500]}"
-            )
 
     # -----------------------------------------------
     # Deterministic classification: shortlist/reject

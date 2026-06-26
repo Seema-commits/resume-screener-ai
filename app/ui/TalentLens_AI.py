@@ -40,7 +40,7 @@ from app.services.database_service import (
 # ---------------------------------------------------
 
 st.set_page_config(
-    page_title="Smart Recruit AI",
+    page_title="TalentLens AI",
     page_icon="🎯",
     layout="wide"
 )
@@ -97,7 +97,7 @@ orchestrator = WorkflowOrchestrator()
 # HEADER
 # ---------------------------------------------------
 
-st.title("🎯 Smart Recruit AI")
+st.title("🎯 TalentLens AI")
 
 
 # ---------------------------------------------------
@@ -261,6 +261,12 @@ if agent_mode == "Resume Screening":
         placeholder="Paste or type the job description here..."
     )
 
+    st.caption(
+        "💡 Tip: after pasting, press **Cmd+Enter** (Mac) or "
+        "**Ctrl+Enter** (Windows) while still in the box to "
+        "continue immediately - no need to click elsewhere."
+    )
+
     jd_entered = bool(st.session_state.screening_jd.strip())
 
     if jd_entered:
@@ -270,18 +276,12 @@ if agent_mode == "Resume Screening":
             "**Upload Resumes** field in the sidebar."
         )
 
-    if jd_entered and uploaded_files:
+    st.subheader("🚀 Step 3: Run Screening")
 
-        st.subheader("🚀 Step 3: Run Screening")
-
-        run_clicked = st.button(
-            "🔍 Screen Resumes Now",
-            type="primary"
-        )
-
-    else:
-
-        run_clicked = False
+    run_clicked = st.button(
+        "🔍 Screen Resumes Now",
+        type="primary"
+    )
 
     if run_clicked:
 
